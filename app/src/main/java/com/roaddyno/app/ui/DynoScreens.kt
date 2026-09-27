@@ -128,6 +128,9 @@ fun RunResultPage(samples: List<SpeedSample>, initial: RunConfiguration?,
     var speed3000 by rememberSaveable { mutableStateOf(initial?.speed3000Kmh) }
     var tyreSize by rememberSaveable { mutableStateOf(initial?.tyreSize) }
     val config = mass?.let { RunConfiguration(vehicle, it, gear, rpm, kmh, speed2000, speed3000, tyreSize) }
+    val validTrace = remember(samples) {
+        samples.filter { it.hasSpeed && it.speedMps.isFinite() && it.timestampNs > 0 }
+    }
     val travel = remember(samples, tyreSize) {
         WheelTravelCalculator(config?.tyreGeometry()).apply { samples.forEach { accept(it) } }.snapshot()
     }
@@ -157,6 +160,13 @@ fun RunResultPage(samples: List<SpeedSample>, initial: RunConfiguration?,
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("WYNIK POMIARU", style = MaterialTheme.typography.headlineSmall)
+        Text("PRĘDKOŚĆ PODCZAS CAŁEGO ZAPISU", style = MaterialTheme.typography.titleMedium)
+        ResultMetric("Zapisane próbki", samples.size.toString())
+        if (validTrace.isNotEmpty()) {
+            ResultMetric("Czas zapisu", "${f((validTrace.last().timestampNs - validTrace.first().timestampNs) / 1e9)} s")
+            CurveChart(validTrace.map { (it.timestampNs - validTrace.first().timestampNs) / 1e9 },
+                listOf(Curve("Prędkość GNSS", Color(0xFF1976D2), validTrace.map { it.speedMps * 3.6 })), "s", "km/h")
+        } else Text("Brak poprawnej prędkości w zapisie.")
         config?.let {
             Text("${it.vehicleName.ifBlank { "Samochód" }} · ${f(it.massKg, 0)} kg · bieg ${it.gear ?: "—"}")
         }
@@ -191,9 +201,10 @@ fun RunResultPage(samples: List<SpeedSample>, initial: RunConfiguration?,
         result?.let { report ->
             val peak = report.points.filter { it.correctedPowerKw != null }.maxByOrNull { it.correctedPowerKw!! }
             val torque = report.points.filter { it.torqueNm != null }.maxByOrNull { it.torqueNm!! }
-            Text(peak?.let { "${f(it.correctedPowerKw!! * 1.3596216)} KM" } ?: "Brak wyniku ze stratami",
+            Text("${f((peak?.correctedPowerKw ?: report.peakWheelPowerKw) * 1.3596216)} KM",
                 style = MaterialTheme.typography.displaySmall)
-            Text("Moc ze stratami · maksimum w zakresie pokrytym wybiegiem")
+            Text(if (peak != null) "Moc z oporami · maksimum w zakresie pokrytym wybiegiem"
+                else "Moc rozpędzania · brak wybiegu w tym zakresie")
             peak?.let {
                 ResultMetric("Przy", it.rpm?.let { value -> "${f(value, 0)} rpm" } ?: "${f(it.speedKmh)} km/h")
                 ResultMetric("Moc rozpędzania w tym punkcie", "${f(it.wheelPowerKw * 1.3596216)} KM")
@@ -218,12 +229,15 @@ fun RunResultPage(samples: List<SpeedSample>, initial: RunConfiguration?,
                 Text("MOMENT", style = MaterialTheme.typography.titleMedium)
                 CurveChart(x, listOf(Curve("Moment ze stratami", Color(0xFF7B1FA2), report.points.map { it.torqueNm })), xLabel, "Nm")
             }
-            Text("PRZEBIEG PRĘDKOŚCI", style = MaterialTheme.typography.titleMedium)
-            val valid = samples.filter { it.hasSpeed && it.speedMps.isFinite() && it.timestampNs > 0 }
-            if (valid.isNotEmpty()) CurveChart(valid.map { (it.timestampNs - valid.first().timestampNs) / 1e9 },
-                listOf(Curve("Surowa prędkość", Color(0xFF1976D2), valid.map { it.speedMps * 3.6 })), "s", "km/h")
             Text("Rozpędzanie: ${f(report.accelerationStartSeconds)}–${f(report.peakSeconds)} s. " +
                 "Wybieg: ${report.coastStartSeconds?.let { f(it) } ?: "—"}–${report.coastEndSeconds?.let { f(it) } ?: "—"} s.")
+            val traceEndSeconds = validTrace.lastOrNull()?.let {
+                (it.timestampNs - validTrace.first().timestampNs) / 1e9
+            }
+            if (traceEndSeconds != null && report.coastEndSeconds != null &&
+                traceEndSeconds > report.coastEndSeconds) {
+                Text("Po wybiegu są jeszcze próbki do ${f(traceEndSeconds)} s. Cały zapis jest na wykresie powyżej; wynik mocy dotyczy zakresu rozpędzania i wybiegu podanego wyżej.")
+            }
             Text("Obliczenia zakładają wybieg z rozłączonym napędem, bez hamowania. Sam zapis prędkości nie rozróżnia hamulca od oporów ruchu.",
                 style = MaterialTheme.typography.bodySmall)
             Button(onClick = {

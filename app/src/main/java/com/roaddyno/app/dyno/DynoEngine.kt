@@ -33,7 +33,7 @@ data class DynoResult(
  * at matching speeds only; neither a drag model nor missing coast data is invented.
  */
 class DynoEngine {
-    companion object { const val VERSION = "energy-coast-2" }
+    companion object { const val VERSION = "energy-coast-3" }
 
     fun analyze(
         raw: List<SpeedSample>,
@@ -50,29 +50,28 @@ class DynoEngine {
                 if (list.isEmpty() || sample.timestampNs > list.last().timestampNs) list.add(sample)
                 list
             }
-        require(samples.size >= 9) { "Za mało próbek: zapisz rozpędzenie i wybieg, następnie naciśnij STOP." }
+        require(samples.size >= 2) { "Potrzebne są co najmniej dwie próbki prędkości. Surowy zapis jest dostępny poniżej." }
         val time = DoubleArray(samples.size) { (samples[it].timestampNs - samples[0].timestampNs) / 1e9 }
         val speed = DoubleArray(samples.size) { samples[it].speedMps }
         val intervals = (1..time.lastIndex).map { time[it] - time[it - 1] }.sorted()
         val medianInterval = intervals[intervals.size / 2]
-        val segment = findRun(time, speed)
-        require((segment.start + 1..segment.end).none {
-            time[it] - time[it - 1] > max(3.0 * medianInterval, 3.0)
-        }) { "Przerwa w zapisie przecina przejazd. Surowe dane pozostają w historii." }
+        // One recorded measurement: the lowest speed before its maximum is the
+        // beginning of acceleration; the lowest speed after it closes the coast.
+        // No minimum speed gain, fixed duration or "best run" score is applied.
+        val peak = speed.indices.maxBy { speed[it] }
+        val start = (0..peak).minBy { speed[it] }
+        require(start < peak) { "W tym zapisie nie ma rozpędzania. Surowy przebieg jest dostępny poniżej." }
+        val end = (peak..speed.lastIndex).minBy { speed[it] }
         // A time window, not a fixed sample count: the same smoothing duration at 1 Hz and 20 Hz.
         val radius = max(2.0, medianInterval * 2.0)
-        val coastStart = (segment.peak + 1..segment.end).firstOrNull {
-            time[it] - time[segment.peak] >= 2.0
-        }
-        val coast = if (coastStart != null && segment.end - coastStart >= 2 &&
-            time[segment.end] - time[coastStart] >= 3.0) {
-            (coastStart..segment.end).mapNotNull { i ->
-                val power = energySlope(time, speed, i, coastStart, segment.end, radius)?.let { -massKg * it / 2000.0 }
+        val coast = if (end > peak) {
+            (peak..end).mapNotNull { i ->
+                val power = energySlope(time, speed, i, peak, end, radius)?.let { -massKg * it / 2000.0 }
                 if (power != null && power > 0) speed[i] to power else null
             }.sortedBy { it.first }.distinctBy { it.first }
         } else emptyList()
-        val points = (segment.start..segment.peak).mapNotNull { i ->
-            val derivative = energySlope(time, speed, i, segment.start, segment.peak, radius)
+        val points = (start..peak).mapNotNull { i ->
+            val derivative = energySlope(time, speed, i, start, peak, radius)
                 ?: return@mapNotNull null
             val wheel = massKg * derivative / 2000.0
             if (wheel <= 0) return@mapNotNull null
@@ -83,59 +82,16 @@ class DynoEngine {
                 corrected * 1000.0 * 60.0 / (2 * PI * rpm) else null
             DynoPoint(time[i], speed[i] * 3.6, rpm, wheel, loss, corrected, torque)
         }
-        require(points.size >= 3) { "Rozpędzanie jest zbyt krótkie do obliczenia krzywej mocy." }
+        require(points.isNotEmpty()) { "Zapis nie zawiera dodatniej mocy rozpędzania. Surowy przebieg jest dostępny poniżej." }
         return DynoResult(
-            points, time[segment.start], time[segment.peak],
-            coastStart?.takeIf { coast.isNotEmpty() }?.let { time[it] },
-            time[segment.end].takeIf { coast.isNotEmpty() },
-            coast.firstOrNull()?.first?.times(3.6), coast.lastOrNull()?.first?.times(3.6),
+            points, time[start], time[peak],
+            time[peak].takeIf { coast.size >= 2 },
+            time[end].takeIf { coast.size >= 2 },
+            coast.firstOrNull()?.first?.times(3.6)?.takeIf { coast.size >= 2 },
+            coast.lastOrNull()?.first?.times(3.6)?.takeIf { coast.size >= 2 },
             points.maxOf { it.wheelPowerKw }, points.mapNotNull { it.correctedPowerKw }.maxOrNull(),
             points.mapNotNull { it.torqueNm }.maxOrNull(), (samples.size - 1) / time.last(),
         )
-    }
-
-    private data class Segment(val start: Int, val peak: Int, val end: Int)
-
-    /** One START/STOP represents one pull. Do not silently select a stronger pull from traffic. */
-    private fun findRun(t: DoubleArray, v: DoubleArray): Segment {
-        val runs = mutableListOf<Segment>()
-        var start = 0
-        var peak = 0
-        var low = 0
-        var accelerating = false
-        var coasting = false
-        for (i in 1..v.lastIndex) {
-            if (!accelerating && !coasting) {
-                if (v[i] <= v[start]) start = i
-                if (v[i] - v[start] >= 10.0 / 3.6 && t[i] - t[start] >= 2.0) {
-                    accelerating = true
-                    peak = (start..i).maxBy { v[it] }
-                }
-            } else if (accelerating) {
-                if (v[i] >= v[peak]) peak = i
-                if (v[peak] - v[i] >= 1.5 / 3.6 && t[i] - t[peak] >= 2.0) {
-                    accelerating = false
-                    coasting = true
-                    low = (peak..i).minBy { v[it] }
-                }
-            } else {
-                if (v[i] <= v[low]) low = i
-                if (v[i] - v[low] >= 1.5 / 3.6 && t[i] - t[low] >= 1.0) {
-                    runs += Segment(start, peak, low)
-                    start = low
-                    coasting = false
-                    if (v[i] - v[start] >= 10.0 / 3.6 && t[i] - t[start] >= 2.0) {
-                        accelerating = true
-                        peak = (start..i).maxBy { v[it] }
-                    }
-                }
-            }
-        }
-        if (accelerating) runs += Segment(start, peak, peak)
-        if (coasting) runs += Segment(start, peak, low)
-        require(runs.isNotEmpty()) { "Nie znaleziono rozpędzenia o co najmniej 10 km/h. Dane są zapisane." }
-        require(runs.size == 1) { "Zapis zawiera kilka rozpędzeń. Wykonaj jeden przejazd: START → rozpędzenie → wybieg → STOP." }
-        return runs.single()
     }
 
     /** Least squares derivative of v²(t), clipped to one phase, in seconds and SI units. */
@@ -144,7 +100,7 @@ class DynoEngine {
         var to = i
         while (from > start && t[i] - t[from - 1] <= radius * 1.05) from--
         while (to < end && t[to + 1] - t[i] <= radius * 1.05) to++
-        if (to - from < 2) return null
+        if (to - from < 1) return null
         val center = (from..to).sumOf { t[it] } / (to - from + 1)
         val denominator = (from..to).sumOf { (t[it] - center) * (t[it] - center) }
         return if (denominator > 0)
