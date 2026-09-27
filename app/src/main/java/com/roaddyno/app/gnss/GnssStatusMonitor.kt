@@ -46,7 +46,8 @@ class GnssStatusMonitor(private val context: Context, private val manager: Locat
             mutableStatus.value = mutableStatus.value.copy(
                 rawRateHz = if (rawEventCount > 1 && elapsedNs > 0) (rawEventCount - 1) * 1e9 / elapsedNs else null,
                 rawEventCount = rawEventCount,
-                fullTrackingActive = event.isFullTracking,
+                fullTrackingActive = if (Build.VERSION.SDK_INT >= 34 && event.hasIsFullTracking())
+                    event.isFullTracking else null,
             )
         }
     }
