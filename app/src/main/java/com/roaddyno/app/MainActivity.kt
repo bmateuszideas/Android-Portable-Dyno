@@ -146,6 +146,7 @@ private fun RoadDynoScreen(vm: MainViewModel = viewModel()) {
                 onStart = vm::start,
                 onStop = vm::stop,
                 onSession = { id -> selectedId = id; page = "details" },
+                onAnalyzeSession = { id -> selectedId = id; page = "dyno" },
             )
             "sessions" -> SessionsPage(sessions) { id -> selectedId = id; page = "details" }
             "dyno" -> {
@@ -192,6 +193,7 @@ private fun MeasurementPage(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onSession: (Long) -> Unit,
+    onAnalyzeSession: (Long) -> Unit,
 ) {
     val recording = state as? MeasurementState.Recording
     Column(
@@ -226,7 +228,10 @@ private fun MeasurementPage(
             else -> Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) { Text("START") }
         }
         when (state) {
-            is MeasurementState.Completed -> Button(onClick = { onSession(state.sessionId) }) { Text("VIEW LAST SESSION") }
+            is MeasurementState.Completed -> {
+                Button(onClick = { onAnalyzeSession(state.sessionId) }, modifier = Modifier.fillMaxWidth()) { Text("ANALYZE LAST SESSION") }
+                OutlinedButton(onClick = { onSession(state.sessionId) }) { Text("SESSION DETAILS / EXPORT CSV") }
+            }
             is MeasurementState.Error -> Text(state.message, color = MaterialTheme.colorScheme.error)
             else -> Unit
         }
