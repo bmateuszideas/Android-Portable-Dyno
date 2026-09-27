@@ -28,4 +28,13 @@ class SamplingStatisticsCalculatorTest {
         assertNull(calculator.snapshot().currentRateHz)
         assertNull(calculator.snapshot().averageRateHz)
     }
+
+    @Test fun singleMissedOneHertzUpdateIsReportedAsGap() {
+        val calculator = SamplingStatisticsCalculator()
+        listOf(1L, 2L, 3L, 5L, 6L, 7L).forEach { calculator.accept(sample(it * 1_000_000_000L)) }
+        val statistics = calculator.snapshot(fullDistribution = true)
+        assertEquals(1, statistics.gapCount)
+        assertEquals(2_000.0, statistics.maxDeltaMs!!, 1e-8)
+        assertEquals(1_000.0, statistics.medianDeltaMs!!, 1e-8)
+    }
 }
