@@ -177,6 +177,14 @@ private fun MeasurementPage(
         Metric("Average Δt", recording?.statistics?.averageDeltaMs.ms())
         Metric("Min / max Δt", "${recording?.statistics?.minDeltaMs.ms()} / ${recording?.statistics?.maxDeltaMs.ms()}")
         Metric("Satellites", recording?.satellites?.let { "${it.visible ?: "—"} / ${it.usedInFix ?: "—"}" } ?: "—")
+        Metric("Raw GNSS events", recording?.satellites?.let {
+            if (it.rawMeasurementsAvailable) "${it.rawRateHz.hz()} · ${it.rawEventCount} events" else "UNAVAILABLE"
+        } ?: "—")
+        Metric("GNSS full tracking", when (recording?.satellites?.fullTrackingActive) {
+            true -> "ACTIVE"
+            false -> "INACTIVE"
+            null -> "—"
+        })
         when {
             !precise -> Button(onClick = onPermission, modifier = Modifier.fillMaxWidth()) { Text("GRANT PRECISE LOCATION") }
             !gpsEnabled -> Button(onClick = onSettings, modifier = Modifier.fillMaxWidth()) { Text("OPEN LOCATION SETTINGS") }
