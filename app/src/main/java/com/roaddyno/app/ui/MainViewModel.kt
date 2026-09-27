@@ -18,7 +18,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-data class ImportedRun(val name: String, val samples: List<SpeedSample>)
+data class ImportedRun(val name: String, val samples: List<SpeedSample>, val configuration: RunConfiguration? = null)
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = (application as RoadDynoApp).repository
@@ -37,6 +37,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             preferences.getString("gear", null)?.toIntOrNull(),
             preferences.getString("rpm", null)?.toDoubleOrNull(),
             preferences.getString("kmh", null)?.toDoubleOrNull(),
+            preferences.getString("speed2000", null)?.toDoubleOrNull(),
+            preferences.getString("speed3000", null)?.toDoubleOrNull(),
+            preferences.getString("tyre", null),
         ).validate()
     }.getOrNull()
 
@@ -47,7 +50,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .putString("mass", configuration.massKg.toString())
                 .putString("gear", configuration.gear?.toString())
                 .putString("rpm", configuration.calibrationRpm?.toString())
-                .putString("kmh", configuration.calibrationSpeedKmh?.toString()).apply()
+                .putString("kmh", configuration.calibrationSpeedKmh?.toString())
+                .putString("speed2000", configuration.speed2000Kmh?.toString())
+                .putString("speed3000", configuration.speed3000Kmh?.toString())
+                .putString("tyre", configuration.tyreSize).apply()
             MeasurementService.start(getApplication(), configuration)
         }
         catch (error: Exception) { mutableMessage.value = error.message ?: "Unable to start recording." }
@@ -64,7 +70,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun export(sessionId: Long, uri: Uri) = viewModelScope.launch {
         try {
-            CsvExporter(getApplication()).export(uri, repository.getSamples(sessionId))
+            CsvExporter(getApplication()).export(uri, repository.getSamples(sessionId), repository.getSession(sessionId)?.configuration())
             mutableMessage.value = "CSV saved."
         } catch (error: Exception) {
             mutableMessage.value = error.message ?: "CSV export failed."
@@ -87,12 +93,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun importCsv(uri: Uri) = viewModelScope.launch {
         mutableImported.value = null
         try {
-            val samples = withContext(Dispatchers.IO) {
-                getApplication<Application>().contentResolver.openInputStream(uri)?.reader()?.use { RawCsvReader.read(it) }
+            val recording = withContext(Dispatchers.IO) {
+                getApplication<Application>().contentResolver.openInputStream(uri)?.reader()?.use { RawCsvReader.readRecording(it) }
                     ?: throw IllegalArgumentException("Cannot open CSV file.")
             }
-            mutableImported.value = ImportedRun(uri.lastPathSegment ?: "Imported CSV", samples)
-            mutableMessage.value = "Loaded ${samples.size} raw speed samples."
+            mutableImported.value = ImportedRun(uri.lastPathSegment ?: "Imported CSV", recording.samples, recording.configuration)
+            mutableMessage.value = "Wczytano ${recording.samples.size} próbek."
         } catch (error: Exception) {
             mutableMessage.value = error.message ?: "CSV import failed."
         }
