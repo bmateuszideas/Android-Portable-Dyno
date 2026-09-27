@@ -28,8 +28,10 @@ jobs:
           name: AndroidRoadDyno-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
+      - name: Stage APK signing tool
+        run: cp "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar" apksigner.jar
       - name: Archive APK signing tool for local development signing
         uses: actions/upload-artifact@v4
         with:
           name: AndroidRoadDyno-signing-tool
-          path: ${{ env.ANDROID_HOME }}/build-tools/35.0.0/lib/apksigner.jar
+          path: apksigner.jar

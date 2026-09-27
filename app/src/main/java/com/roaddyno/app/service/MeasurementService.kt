@@ -38,6 +38,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.produceIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -192,9 +193,9 @@ class MeasurementService : Service() {
         var lastFlushNs = SystemClock.elapsedRealtimeNanos()
         val statusJob = scope.launch {
             statusMonitor.status.collect { satellites ->
-                val current = mutableState.value
-                if (current is MeasurementState.Recording && current.sessionId == sessionId) {
-                    mutableState.value = current.copy(satellites = satellites)
+                mutableState.update { current ->
+                    if (current is MeasurementState.Recording && current.sessionId == sessionId)
+                        current.copy(satellites = satellites) else current
                 }
             }
         }
@@ -231,9 +232,9 @@ class MeasurementService : Service() {
                 val snapshot = statistics.accept(sample, flags != 0)
                 val travel = wheelTravel.accept(sample)
                 if (pending.size >= 50) flush()
-                val current = mutableState.value
-                if (current is MeasurementState.Recording && current.sessionId == sessionId) {
-                    mutableState.value = current.copy(sample = sample, statistics = snapshot, wheelTravel = travel)
+                mutableState.update { current ->
+                    if (current is MeasurementState.Recording && current.sessionId == sessionId)
+                        current.copy(sample = sample, statistics = snapshot, wheelTravel = travel) else current
                 }
                 if (sample.receivedElapsedRealtimeNs - lastNotificationNs >= 1_000_000_000L) {
                     lastNotificationNs = sample.receivedElapsedRealtimeNs
