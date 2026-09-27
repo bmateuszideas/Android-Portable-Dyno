@@ -183,7 +183,7 @@ private fun MeasurementPage(
         Metric("GNSS full tracking", when (recording?.satellites?.fullTrackingActive) {
             true -> "ACTIVE"
             false -> "INACTIVE"
-            null -> "—"
+            null -> if (recording?.satellites?.rawMeasurementsAvailable == true) "REQUESTED" else "—"
         })
         when {
             !precise -> Button(onClick = onPermission, modifier = Modifier.fillMaxWidth()) { Text("GRANT PRECISE LOCATION") }
