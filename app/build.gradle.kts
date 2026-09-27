@@ -17,12 +17,6 @@ android {
         versionName = "0.1.0"
     }
 
-    buildTypes {
-        getByName("debug") {
-            applicationIdSuffix = ".dyno"
-        }
-    }
-
     buildFeatures {
         compose = true
     }
