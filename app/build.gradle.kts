@@ -17,6 +17,12 @@ android {
         versionName = "0.1.0"
     }
 
+    buildTypes {
+        getByName("debug") {
+            applicationIdSuffix = ".test"
+        }
+    }
+
     buildFeatures {
         compose = true
     }
