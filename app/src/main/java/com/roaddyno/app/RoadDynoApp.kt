@@ -12,7 +12,8 @@ import kotlinx.coroutines.async
 class RoadDynoApp : Application() {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val database by lazy {
-        Room.databaseBuilder(this, RoadDynoDatabase::class.java, "road_dyno.db").build()
+        Room.databaseBuilder(this, RoadDynoDatabase::class.java, "road_dyno.db")
+            .addMigrations(RoadDynoDatabase.MIGRATION_1_2).build()
     }
     val repository by lazy { MeasurementRepository(database) }
     val recovery by lazy { appScope.async { repository.recoverInterruptedSessions() } }

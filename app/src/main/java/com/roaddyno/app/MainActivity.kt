@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -58,6 +59,9 @@ import com.roaddyno.app.domain.model.SpeedSample
 import com.roaddyno.app.dyno.DynoEngine
 import com.roaddyno.app.dyno.DynoPoint
 import com.roaddyno.app.dyno.DynoResult
+import com.roaddyno.app.dyno.RunConfiguration
+import com.roaddyno.app.ui.RunSetupForm
+import com.roaddyno.app.ui.RunResultPage
 import com.roaddyno.app.measurement.sessionReport
 import com.roaddyno.app.replay.ReplayMode
 import com.roaddyno.app.replay.ReplaySpeedSource
@@ -126,12 +130,22 @@ private fun RoadDynoScreen(vm: MainViewModel = viewModel()) {
         }
     }
 
-    Column(Modifier.fillMaxSize().padding(20.dp)) {
+    var handledCompletion by rememberSaveable { mutableLongStateOf(-1L) }
+    LaunchedEffect(measurement) {
+        val completed = measurement as? MeasurementState.Completed
+        if (completed != null && completed.sessionId != handledCompletion) {
+            handledCompletion = completed.sessionId
+            selectedId = completed.sessionId
+            page = "dyno"
+        }
+    }
+
+    Column(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
         Text("ANDROID ROAD DYNO", style = MaterialTheme.typography.headlineSmall)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { page = "measurement" }) { Text("LOGGER") }
-            OutlinedButton(onClick = { page = "sessions" }) { Text("SESSIONS") }
-            OutlinedButton(onClick = { page = "dyno" }) { Text("DYNO") }
+            OutlinedButton(onClick = { page = "measurement" }) { Text("POMIAR") }
+            OutlinedButton(onClick = { page = "sessions" }) { Text("HISTORIA") }
+            OutlinedButton(onClick = { csvImportLauncher.launch(arrayOf("*/*")) }) { Text("CSV") }
         }
         HorizontalDivider()
         if (message != null) {
@@ -143,21 +157,31 @@ private fun RoadDynoScreen(vm: MainViewModel = viewModel()) {
                 measurement, precise, gpsEnabled,
                 onPermission = { locationPermission.launch(arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)) },
                 onSettings = { context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) },
+                initialConfiguration = vm.lastConfiguration(),
                 onStart = vm::start,
                 onStop = vm::stop,
                 onSession = { id -> selectedId = id; page = "details" },
                 onAnalyzeSession = { id -> selectedId = id; page = "dyno" },
             )
-            "sessions" -> SessionsPage(sessions) { id -> selectedId = id; page = "details" }
+            "sessions" -> SessionsPage(sessions) { id -> selectedId = id; page = "dyno" }
             "dyno" -> {
-                val speedSamples by produceState<List<SpeedSample>?>(null, selectedId, imported) {
-                    value = when {
-                        selectedId == -2L -> imported?.samples
-                        selectedId >= 0 -> vm.getSamples(selectedId).map { it.toDomain() }
-                        else -> null
+                androidx.compose.runtime.key(selectedId, imported) {
+                    val loaded by produceState<Pair<List<SpeedSample>, RunConfiguration?>?>(null) {
+                        value = when {
+                            selectedId == -2L -> imported?.let { it.samples to null }
+                            selectedId >= 0 -> vm.getSamples(selectedId).map { it.toDomain() } to
+                                vm.getSession(selectedId)?.configuration()
+                            else -> null
+                        }
                     }
+                    loaded?.let { (samples, configuration) ->
+                        RunResultPage(samples, configuration,
+                            onExport = vm::exportResult,
+                            onConfiguration = { config -> if (selectedId >= 0) vm.saveConfiguration(selectedId, config) },
+                            onDetails = if (selectedId >= 0) ({ page = "details" }) else null,
+                        )
+                    } ?: Text("Wczytywanie przejazdu…")
                 }
-                DynoPage(speedSamples, onImport = { csvImportLauncher.launch(arrayOf("*/*")) })
             }
             "details", "replay" -> {
                 val session = sessions.firstOrNull { it.id == selectedId }
@@ -190,7 +214,8 @@ private fun MeasurementPage(
     gpsEnabled: Boolean,
     onPermission: () -> Unit,
     onSettings: () -> Unit,
-    onStart: () -> Unit,
+    initialConfiguration: RunConfiguration?,
+    onStart: (RunConfiguration) -> Unit,
     onStop: () -> Unit,
     onSession: (Long) -> Unit,
     onAnalyzeSession: (Long) -> Unit,
@@ -201,36 +226,40 @@ private fun MeasurementPage(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("GNSS LOGGER", style = MaterialTheme.typography.titleMedium)
-        Text(recording?.sample?.speedMps?.times(3.6).number(1), style = MaterialTheme.typography.displayLarge)
-        Text("km/h", style = MaterialTheme.typography.titleLarge)
-        Metric("GNSS", when { !precise -> "PRECISE LOCATION REQUIRED"; !gpsEnabled -> "GPS OFF"; else -> "READY" })
-        Metric("Speed accuracy", recording?.sample?.speedAccuracyMps?.let { "±${it.number(2)} m/s" } ?: "—")
-        Metric("Current rate", recording?.statistics?.currentRateHz.hz())
-        Metric("Average rate", recording?.statistics?.averageRateHz.hz())
-        Metric("Samples", recording?.statistics?.sampleCount?.toString() ?: "—")
-        Metric("Average Δt", recording?.statistics?.averageDeltaMs.ms())
-        Metric("Min / max Δt", "${recording?.statistics?.minDeltaMs.ms()} / ${recording?.statistics?.maxDeltaMs.ms()}")
-        Metric("Satellites", recording?.satellites?.let { "${it.visible ?: "—"} / ${it.usedInFix ?: "—"}" } ?: "—")
-        Metric("Raw GNSS events", recording?.satellites?.let {
-            if (it.rawMeasurementsAvailable) "${it.rawRateHz.hz()} · ${it.rawEventCount} events" else "UNAVAILABLE"
-        } ?: "—")
-        Metric("GNSS full tracking", when (recording?.satellites?.fullTrackingActive) {
-            true -> "ACTIVE"
-            false -> "INACTIVE"
-            null -> if (recording?.satellites?.rawMeasurementsAvailable == true) "REQUESTED" else "—"
-        })
-        when {
-            !precise -> Button(onClick = onPermission, modifier = Modifier.fillMaxWidth()) { Text("GRANT PRECISE LOCATION") }
-            !gpsEnabled -> Button(onClick = onSettings, modifier = Modifier.fillMaxWidth()) { Text("OPEN LOCATION SETTINGS") }
-            recording != null || state is MeasurementState.Preparing -> Button(onClick = onStop, modifier = Modifier.fillMaxWidth()) { Text("STOP") }
-            state is MeasurementState.Stopping -> Text("Finishing session…")
-            else -> Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) { Text("START") }
+        if (recording != null || state is MeasurementState.Preparing || state is MeasurementState.Stopping) {
+            Text("TRWA POMIAR", style = MaterialTheme.typography.titleLarge)
+            Text(recording?.sample?.takeIf { it.hasSpeed }?.speedMps?.times(3.6).number(1),
+                style = MaterialTheme.typography.displayLarge)
+            Text("km/h", style = MaterialTheme.typography.titleLarge)
+            Text("Rozpędź auto na wybranym biegu, rozłącz napęd i wykonaj wybieg. Po zakończeniu naciśnij STOP.")
+            Metric("Odebrane próbki", recording?.statistics?.sampleCount?.toString() ?: "—")
+            Metric("Próbkowanie", recording?.statistics?.currentRateHz.hz())
+            if (state is MeasurementState.Stopping) Text("Zapisuję sesję…")
+            else Button(onClick = onStop, modifier = Modifier.fillMaxWidth().height(72.dp)) { Text("STOP · OBLICZ WYNIK") }
+            var diagnostics by remember { mutableStateOf(false) }
+            OutlinedButton(onClick = { diagnostics = !diagnostics }) { Text("Dane GNSS") }
+            if (diagnostics) {
+                Metric("Dokładność prędkości", recording?.sample?.speedAccuracyMps?.msUnit() ?: "—")
+                Metric("Średnie Hz", recording?.statistics?.averageRateHz.hz())
+                Metric("Min / max Δt", "${recording?.statistics?.minDeltaMs.ms()} / ${recording?.statistics?.maxDeltaMs.ms()}")
+                Metric("Satelity widoczne / używane", recording?.satellites?.let { "${it.visible} / ${it.usedInFix}" } ?: "—")
+            }
+        } else {
+            Text("HAMOWNIA DROGOWA", style = MaterialTheme.typography.titleLarge)
+            Text("START → rozpędzenie → wybieg na luzie → STOP → wynik")
+            Text("Masa obejmuje samochód, paliwo, kierowcę i dodatkowe obciążenie. Kalibracja RPM dotyczy biegu pomiarowego.")
+            when {
+                !precise -> Button(onClick = onPermission) { Text("ZEZWÓL NA DOKŁADNĄ LOKALIZACJĘ") }
+                !gpsEnabled -> Button(onClick = onSettings) { Text("WŁĄCZ LOKALIZACJĘ") }
+            }
+            RunSetupForm(initialConfiguration, "START POMIARU", precise && gpsEnabled, onStart)
+            Text("Jeden zapis = jedno rozpędzenie i wybieg. Pomiar wykonuj na zamkniętym odcinku testowym.",
+                style = MaterialTheme.typography.bodySmall)
         }
         when (state) {
             is MeasurementState.Completed -> {
-                Button(onClick = { onAnalyzeSession(state.sessionId) }, modifier = Modifier.fillMaxWidth()) { Text("ANALYZE LAST SESSION") }
-                OutlinedButton(onClick = { onSession(state.sessionId) }) { Text("SESSION DETAILS / EXPORT CSV") }
+                Button(onClick = { onAnalyzeSession(state.sessionId) }, modifier = Modifier.fillMaxWidth()) { Text("OSTATNI WYNIK") }
+                OutlinedButton(onClick = { onSession(state.sessionId) }) { Text("DANE / CSV") }
             }
             is MeasurementState.Error -> Text(state.message, color = MaterialTheme.colorScheme.error)
             else -> Unit
@@ -242,15 +271,17 @@ private fun MeasurementPage(
 private fun SessionsPage(sessions: List<SessionEntity>, onSelect: (Long) -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("SESSIONS", style = MaterialTheme.typography.titleLarge)
-        if (sessions.isEmpty()) Text("No saved sessions yet.")
+        if (sessions.isEmpty()) Text("Brak zapisanych pomiarów.")
         for (session in sessions) {
             HorizontalDivider()
             val date = remember(session.createdAtMillis) {
                 SimpleDateFormat("dd.MM.yyyy  HH:mm", Locale.getDefault()).format(Date(session.createdAtMillis))
             }
+            Text(session.vehicleName.ifBlank { "Pomiar" }, style = MaterialTheme.typography.titleMedium)
             Text(date)
+            Text("${session.measurementMassKg.number(0)} kg · bieg ${session.measurementGear ?: "—"}")
             Text("${session.sampleCount} samples · ${session.status}")
-            Button(onClick = { onSelect(session.id) }) { Text("DETAILS") }
+            Button(onClick = { onSelect(session.id) }) { Text("OTWÓRZ WYNIK") }
         }
     }
 }
@@ -279,122 +310,9 @@ private fun SessionDetailsPage(
         Metric("Best / worst accuracy", "${report.bestSpeedAccuracyMps.msUnit()} / ${report.worstSpeedAccuracyMps.msUnit()}")
         Metric("Min / max speed", "${report.minSpeedKmh.kmh()} / ${report.maxSpeedKmh.kmh()}")
         Button(onClick = onReplay, modifier = Modifier.fillMaxWidth()) { Text("REPLAY") }
-        Button(onClick = onAnalyze, modifier = Modifier.fillMaxWidth()) { Text("ANALYZE DYNO") }
-        Button(onClick = onExport, modifier = Modifier.fillMaxWidth()) { Text("EXPORT CSV") }
+        Button(onClick = onAnalyze, modifier = Modifier.fillMaxWidth()) { Text("WYNIK HAMOWNI") }
+        Button(onClick = onExport, modifier = Modifier.fillMaxWidth()) { Text("SUROWE DANE CSV") }
         OutlinedButton(onClick = onDelete, modifier = Modifier.fillMaxWidth(), enabled = session.status != "RECORDING") { Text("DELETE") }
-    }
-}
-
-@Composable
-private fun DynoPage(samples: List<SpeedSample>?, onImport: () -> Unit) {
-    var massText by rememberSaveable { mutableStateOf("") }
-    var calibrationRpmText by rememberSaveable { mutableStateOf("") }
-    var calibrationSpeedText by rememberSaveable { mutableStateOf("") }
-    var result by remember { mutableStateOf<DynoResult?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var working by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    LaunchedEffect(samples) { result = null; error = null }
-
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text("ROAD DYNO", style = MaterialTheme.typography.titleLarge)
-        Text("Recorded session or raw CSV → power from acceleration and road load from the following coast.")
-        OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) { Text("OPEN RAW CSV") }
-        Text("Loaded samples: ${samples?.size ?: 0}")
-        OutlinedTextField(
-            massText, onValueChange = { massText = it; result = null },
-            label = { Text("Measurement mass: car + driver + load [kg]") },
-            modifier = Modifier.fillMaxWidth(), singleLine = true,
-        )
-        Text("Optional RPM calibration on the measurement gear")
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-                calibrationRpmText, onValueChange = { calibrationRpmText = it; result = null },
-                label = { Text("RPM") }, modifier = Modifier.weight(1f), singleLine = true,
-            )
-            OutlinedTextField(
-                calibrationSpeedText, onValueChange = { calibrationSpeedText = it; result = null },
-                label = { Text("At km/h") }, modifier = Modifier.weight(1f), singleLine = true,
-            )
-        }
-        Button(
-            onClick = {
-                val input = samples ?: return@Button
-                val mass = massText.replace(',', '.').toDoubleOrNull()
-                if (mass == null || mass <= 0) { error = "Enter the real measurement mass in kg."; return@Button }
-                val rpm = calibrationRpmText.replace(',', '.').toDoubleOrNull()
-                val speed = calibrationSpeedText.replace(',', '.').toDoubleOrNull()
-                if ((rpm == null) != (speed == null) ||
-                    (rpm == null && (calibrationRpmText.isNotBlank() || calibrationSpeedText.isNotBlank()))
-                ) { error = "Fill both RPM calibration fields or leave both empty."; return@Button }
-                working = true
-                error = null
-                scope.launch {
-                    val calculated = runCatching {
-                        withContext(Dispatchers.Default) { DynoEngine().analyze(input, mass, rpm, speed) }
-                    }
-                    result = calculated.getOrNull()
-                    error = calculated.exceptionOrNull()?.message
-                    working = false
-                }
-            },
-            enabled = samples != null && !working,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text(if (working) "CALCULATING…" else "CALCULATE POWER") }
-        if (error != null) Text(error ?: "", color = MaterialTheme.colorScheme.error)
-        result?.let { report ->
-            HorizontalDivider()
-            Metric("Peak acceleration power", "${report.peakWheelPowerKw.number(1)} kW / ${(report.peakWheelPowerKw * 1.3596216).number(1)} KM")
-            Metric("Peak with road load", report.peakCorrectedPowerKw?.let {
-                "${it.number(1)} kW / ${(it * 1.3596216).number(1)} KM"
-            } ?: "— (no overlapping coast)")
-            Metric("Peak torque", report.peakTorqueNm?.let { "${it.number(0)} Nm" } ?: "— (add RPM calibration)")
-            Metric("Acceleration", "${report.accelerationStartSeconds.number(1)}–${report.peakSeconds.number(1)} s")
-            Metric("Coast", if (report.coastStartSeconds != null && report.coastEndSeconds != null)
-                "${report.coastStartSeconds.number(1)}–${report.coastEndSeconds.number(1)} s" else "—")
-            Metric("Coast speed range", if (report.coastMinKmh != null && report.coastMaxKmh != null)
-                "${report.coastMinKmh.number(1)}–${report.coastMaxKmh.number(1)} km/h" else "—")
-            Metric("Sample rate", report.sampleRateHz.hz())
-            Text(if (report.points.any { it.rpm != null }) "Power vs RPM" else "Power vs speed",
-                style = MaterialTheme.typography.titleMedium)
-            PowerChart(report.points)
-            Text("Blue: acceleration power. Orange: power plus coast road load where speeds overlap.")
-            Text("Road load is measured during neutral coasting and includes slope and wind. Repeat in the opposite direction before comparing absolute results.")
-        }
-    }
-}
-
-@Composable
-private fun PowerChart(points: List<DynoPoint>) {
-    val x = points.map { it.rpm ?: it.speedKmh }
-    val minX = x.minOrNull() ?: return
-    val maxX = x.maxOrNull() ?: return
-    val maxPower = points.maxOf { maxOf(it.wheelPowerKw, it.correctedPowerKw ?: 0.0) }
-    Canvas(Modifier.fillMaxWidth().height(240.dp)) {
-        val left = 12.dp.toPx()
-        val bottom = size.height - 16.dp.toPx()
-        val top = 12.dp.toPx()
-        val width = (size.width - left - 8.dp.toPx()).coerceAtLeast(1f)
-        val height = (bottom - top).coerceAtLeast(1f)
-        fun position(i: Int, power: Double): Offset {
-            val horizontal = if (maxX > minX) (x[i] - minX) / (maxX - minX) else 0.0
-            return Offset(left + (horizontal * width).toFloat(),
-                bottom - (power / maxPower.coerceAtLeast(0.1) * height).toFloat())
-        }
-        drawLine(Color.Gray, Offset(left, top), Offset(left, bottom), strokeWidth = 1f)
-        drawLine(Color.Gray, Offset(left, bottom), Offset(size.width, bottom), strokeWidth = 1f)
-        for (i in 1 until points.size) {
-            drawLine(Color(0xFF176B93), position(i - 1, points[i - 1].wheelPowerKw),
-                position(i, points[i].wheelPowerKw), strokeWidth = 3.dp.toPx())
-            val before = points[i - 1].correctedPowerKw
-            val after = points[i].correctedPowerKw
-            if (before != null && after != null)
-                drawLine(Color(0xFFE18A20), position(i - 1, before), position(i, after),
-                    strokeWidth = 3.dp.toPx())
-        }
     }
 }
 
