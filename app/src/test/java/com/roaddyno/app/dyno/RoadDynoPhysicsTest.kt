@@ -52,17 +52,29 @@ class RoadDynoPhysicsTest {
         assertTrue(result.points.all { it.lossPowerKw == null && it.torqueNm == null })
     }
 
+    @Test fun calibratedAccelerationWithoutCoastHasMeasuredTorque() {
+        val result = DynoEngine().analyze(run().take(21), 1000.0, 3000.0, 54.0)
+        val at15Mps = at54(result)
+        assertEquals(23.873241, at15Mps.wheelTorqueNm!!, .001)
+        assertNull(at15Mps.torqueNm)
+        assertTrue(result.peakWheelTorqueNm!! > 0.0)
+        assertNull(result.peakTorqueNm)
+    }
+
     @Test fun incompleteCoastNeverExtrapolatesLosses() {
         val result = DynoEngine().analyze(run(coastSeconds = 20), 1000.0)
         assertTrue(result.points.any { it.correctedPowerKw != null })
         assertTrue(result.points.filter { it.speedKmh < 57.6 }.all { it.lossPowerKw == null })
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun multipleRunsAreNotSilentlyScoredAndSelected() {
+    @Test fun extraManeuversDoNotDestroyTheRecordedRun() {
         val first = run()
         val second = run().map { it.copy(timestampNs = it.timestampNs + 71_000_000_000L) }
-        DynoEngine().analyze(first + second, 1000.0)
+        val result = DynoEngine().analyze(first + second, 1000.0)
+        assertEquals(0.0, result.accelerationStartSeconds, 0.0)
+        assertEquals(20.0, result.peakSeconds, 0.0)
+        assertEquals(70.0, result.coastEndSeconds!!, 0.0)
+        assertTrue(second.last().timestampNs > (result.coastEndSeconds!! * 1e9).toLong())
     }
 
     @Test fun analysisPreservesRawOrderingAndValuesWithDuplicateTimestamp() {
@@ -73,9 +85,39 @@ class RoadDynoPhysicsTest {
         assertEquals(before, original)
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun gapsInsideRunAreNotBridged() {
-        DynoEngine().analyze(run().filterIndexed { i, _ -> i !in 6..12 }, 1000.0)
+    @Test fun aGapDoesNotDiscardMeasuredPowerOnEitherSide() {
+        val result = DynoEngine().analyze(run().filterIndexed { i, _ -> i !in 6..12 }, 1000.0)
+        val before = result.points.minBy { abs(it.elapsedSeconds - 3) }
+        val after = result.points.minBy { abs(it.elapsedSeconds - 16) }
+        assertEquals(3.0, before.elapsedSeconds, 0.0)
+        assertEquals(16.0, after.elapsedSeconds, 0.0)
+        assertEquals(5.75, before.wheelPowerKw, .001)
+        assertEquals(9.0, after.wheelPowerKw, .001)
+        assertTrue(result.points.none { it.elapsedSeconds in 6.0..12.0 })
+    }
+
+    @Test fun energyBetweenTwoSamplesProducesIntervalPowerWithoutThresholds() {
+        val samples = listOf(sample(0.0, 10.0), sample(1.0, 10.5))
+        val result = DynoEngine().analyze(samples, 1000.0)
+        assertEquals(5.125, result.peakWheelPowerKw, 1e-9)
+        assertNull(result.peakCorrectedPowerKw)
+        assertEquals(1.0, result.peakSeconds, 0.0)
+    }
+
+    @Test fun theCoastStartsAtThePeakAndCanCoverItsSpeed() {
+        val samples = listOf(sample(0.0, 10.0), sample(1.0, 12.0), sample(2.0, 11.0))
+        val result = DynoEngine().analyze(samples, 1000.0)
+        assertEquals(1.0, result.coastStartSeconds!!, 0.0)
+        assertEquals(12.0 * 3.6, result.coastMaxKmh!!, 1e-9)
+        assertNotNull(result.peakCorrectedPowerKw)
+    }
+
+    @Test fun flatAfterPeakDoesNotClaimMeasuredCoastRange() {
+        val samples = listOf(sample(0.0, 10.0), sample(1.0, 12.0), sample(2.0, 12.0))
+        val result = DynoEngine().analyze(samples, 1000.0)
+        assertNull(result.coastMinKmh)
+        assertNull(result.coastMaxKmh)
+        assertNull(result.peakCorrectedPowerKw)
     }
 
     @Test(expected = IllegalArgumentException::class)
@@ -89,7 +131,8 @@ class RoadDynoPhysicsTest {
         DynoCsvWriter.write(writer, result, RunConfiguration("Car, \"A\"", 1000.0))
         val text = writer.toString()
         assertTrue(text.contains("\"Car, \"\"A\"\"\""))
+        assertTrue(text.lines().first().contains("acceleration_torque_nm,corrected_torque_nm"))
         assertEquals(result.points.size + 1, text.trimEnd().lines().size)
-        assertTrue(text.lines()[1].endsWith("\"\",\"\",\"\""))
+        assertTrue(text.lines()[1].endsWith("\"\",\"\",\"\",\"\""))
     }
 }

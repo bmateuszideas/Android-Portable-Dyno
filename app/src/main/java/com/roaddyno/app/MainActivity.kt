@@ -165,7 +165,8 @@ private fun RoadDynoScreen(vm: MainViewModel = viewModel()) {
             )
             "sessions" -> SessionsPage(sessions) { id -> selectedId = id; page = "dyno" }
             "dyno" -> {
-                androidx.compose.runtime.key(selectedId, imported) {
+                val selectedStatus = sessions.firstOrNull { it.id == selectedId }?.status
+                androidx.compose.runtime.key(selectedId, imported, selectedStatus) {
                     val loaded by produceState<Pair<List<SpeedSample>, RunConfiguration?>?>(null) {
                         value = when {
                             selectedId == -2L -> imported?.let { it.samples to it.configuration }
@@ -233,7 +234,6 @@ private fun MeasurementPage(
             Text("km/h", style = MaterialTheme.typography.titleLarge)
             Text("Rozpędź auto na wybranym biegu, rozłącz napęd i wykonaj wybieg. Po zakończeniu naciśnij STOP.")
             Metric("Odebrane próbki", recording?.statistics?.sampleCount?.toString() ?: "—")
-            Metric("Próbkowanie", recording?.statistics?.currentRateHz.hz())
             Metric("Droga z prędkości GNSS", "${recording?.wheelTravel?.distanceM.number(1)} m")
             recording?.wheelTravel?.wheelRpm?.let {
                 Metric("Obroty koła z GPS + opony", "${it.number(0)} obr/min")
@@ -243,8 +243,9 @@ private fun MeasurementPage(
             if (state is MeasurementState.Stopping) Text("Zapisuję sesję…")
             else Button(onClick = onStop, modifier = Modifier.fillMaxWidth().height(72.dp)) { Text("STOP · OBLICZ WYNIK") }
             var diagnostics by remember { mutableStateOf(false) }
-            OutlinedButton(onClick = { diagnostics = !diagnostics }) { Text("Dane GNSS") }
+            OutlinedButton(onClick = { diagnostics = !diagnostics }) { Text("Szczegóły sygnału GNSS") }
             if (diagnostics) {
+                Metric("Próbkowanie", recording?.statistics?.currentRateHz.hz())
                 Metric("Dokładność prędkości", recording?.sample?.speedAccuracyMps?.msUnit() ?: "—")
                 Metric("Średnie Hz", recording?.statistics?.averageRateHz.hz())
                 Metric("Min / max Δt", "${recording?.statistics?.minDeltaMs.ms()} / ${recording?.statistics?.maxDeltaMs.ms()}")
