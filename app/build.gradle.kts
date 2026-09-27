@@ -19,7 +19,7 @@ android {
 
     buildTypes {
         getByName("debug") {
-            applicationIdSuffix = ".test"
+            applicationIdSuffix = ".dyno"
         }
     }
 
