@@ -14,4 +14,4 @@ Wynik wybiegu zakłada rozłączony napęd i brak użycia hamulców. Sama prędk
 
 Projekt: Kotlin, Jetpack Compose, Room; Android SDK 36, JDK 17, Gradle 8.13. `gradle :app:testDebugUnitTest :app:assembleDebug` uruchamia testy i buduje pakiet. GitHub Actions wykonuje te same kroki. Na telefonie wymagane są uprawnienie do dokładnej lokalizacji i włączony GPS; foreground service utrzymuje zapis po wygaszeniu ekranu.
 
-Pomiar fizyczny na Galaxy S25 oraz porównanie wartości z urządzeniem referencyjnym wymagają jazdy na zamkniętym odcinku testowym. Nie deklarujemy numerycznej zgodności z własnościowym filtrowaniem Dynomet.
+Poprawność weryfikujemy na znanych przebiegach prędkości i czasu, jednostkach SI, bilansie energii oraz powtarzalnych przejazdach na Galaxy S25. Metoda pomiaru mocy wynika z fizyki pojazdu, nie z dopasowania wyniku do programu konkretnego producenta. Porównując z inną hamownią, trzeba jedynie stosować tę samą masę, zakres prędkości i definicję wyniku (moc rozpędzania, straty albo moc z oporami).
