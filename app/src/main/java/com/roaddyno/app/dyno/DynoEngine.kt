@@ -11,6 +11,7 @@ data class DynoPoint(
     val wheelPowerKw: Double,
     val lossPowerKw: Double?,
     val correctedPowerKw: Double?,
+    val wheelTorqueNm: Double?,
     val torqueNm: Double?,
 )
 
@@ -24,6 +25,7 @@ data class DynoResult(
     val coastMaxKmh: Double?,
     val peakWheelPowerKw: Double,
     val peakCorrectedPowerKw: Double?,
+    val peakWheelTorqueNm: Double?,
     val peakTorqueNm: Double?,
     val sampleRateHz: Double,
 )
@@ -33,7 +35,7 @@ data class DynoResult(
  * at matching speeds only; neither a drag model nor missing coast data is invented.
  */
 class DynoEngine {
-    companion object { const val VERSION = "energy-coast-3" }
+    companion object { const val VERSION = "energy-coast-4" }
 
     fun analyze(
         raw: List<SpeedSample>,
@@ -78,9 +80,11 @@ class DynoEngine {
             val loss = interpolate(coast, speed[i])
             val corrected = loss?.let { wheel + it }
             val rpm = rpmPerKmh?.let { speed[i] * 3.6 * it }
+            val wheelTorque = if (rpm != null && rpm > 0)
+                wheel * 1000.0 * 60.0 / (2 * PI * rpm) else null
             val torque = if (rpm != null && rpm > 0 && corrected != null)
                 corrected * 1000.0 * 60.0 / (2 * PI * rpm) else null
-            DynoPoint(time[i], speed[i] * 3.6, rpm, wheel, loss, corrected, torque)
+            DynoPoint(time[i], speed[i] * 3.6, rpm, wheel, loss, corrected, wheelTorque, torque)
         }
         require(points.isNotEmpty()) { "Zapis nie zawiera dodatniej mocy rozpędzania. Surowy przebieg jest dostępny poniżej." }
         return DynoResult(
@@ -90,6 +94,7 @@ class DynoEngine {
             coast.firstOrNull()?.first?.times(3.6)?.takeIf { coast.size >= 2 },
             coast.lastOrNull()?.first?.times(3.6)?.takeIf { coast.size >= 2 },
             points.maxOf { it.wheelPowerKw }, points.mapNotNull { it.correctedPowerKw }.maxOrNull(),
+            points.mapNotNull { it.wheelTorqueNm }.maxOrNull(),
             points.mapNotNull { it.torqueNm }.maxOrNull(), (samples.size - 1) / time.last(),
         )
     }

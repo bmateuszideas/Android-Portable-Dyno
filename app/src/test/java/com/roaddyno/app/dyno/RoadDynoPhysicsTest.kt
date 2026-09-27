@@ -52,6 +52,15 @@ class RoadDynoPhysicsTest {
         assertTrue(result.points.all { it.lossPowerKw == null && it.torqueNm == null })
     }
 
+    @Test fun calibratedAccelerationWithoutCoastHasMeasuredTorque() {
+        val result = DynoEngine().analyze(run().take(21), 1000.0, 3000.0, 54.0)
+        val at15Mps = at54(result)
+        assertEquals(23.873241, at15Mps.wheelTorqueNm!!, .001)
+        assertNull(at15Mps.torqueNm)
+        assertTrue(result.peakWheelTorqueNm!! > 0.0)
+        assertNull(result.peakTorqueNm)
+    }
+
     @Test fun incompleteCoastNeverExtrapolatesLosses() {
         val result = DynoEngine().analyze(run(coastSeconds = 20), 1000.0)
         assertTrue(result.points.any { it.correctedPowerKw != null })
@@ -122,7 +131,8 @@ class RoadDynoPhysicsTest {
         DynoCsvWriter.write(writer, result, RunConfiguration("Car, \"A\"", 1000.0))
         val text = writer.toString()
         assertTrue(text.contains("\"Car, \"\"A\"\"\""))
+        assertTrue(text.lines().first().contains("acceleration_torque_nm,corrected_torque_nm"))
         assertEquals(result.points.size + 1, text.trimEnd().lines().size)
-        assertTrue(text.lines()[1].endsWith("\"\",\"\",\"\""))
+        assertTrue(text.lines()[1].endsWith("\"\",\"\",\"\",\"\""))
     }
 }
