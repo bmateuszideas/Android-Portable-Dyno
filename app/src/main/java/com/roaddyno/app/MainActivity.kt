@@ -13,10 +13,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -24,6 +26,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -40,6 +43,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -49,6 +54,10 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.roaddyno.app.data.database.SessionEntity
 import com.roaddyno.app.data.database.SpeedSampleEntity
+import com.roaddyno.app.domain.model.SpeedSample
+import com.roaddyno.app.dyno.DynoEngine
+import com.roaddyno.app.dyno.DynoPoint
+import com.roaddyno.app.dyno.DynoResult
 import com.roaddyno.app.measurement.sessionReport
 import com.roaddyno.app.replay.ReplayMode
 import com.roaddyno.app.replay.ReplaySpeedSource
@@ -58,6 +67,10 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import androidx.compose.runtime.rememberCoroutineScope
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -78,6 +91,7 @@ private fun RoadDynoScreen(vm: MainViewModel = viewModel()) {
     val sessions by vm.sessions.collectAsState(initial = emptyList())
     val measurement by vm.measurement.collectAsState()
     val message by vm.message.collectAsState()
+    val imported by vm.imported.collectAsState()
     var page by rememberSaveable { mutableStateOf("measurement") }
     var selectedId by rememberSaveable { mutableLongStateOf(-1L) }
     var precise by remember { mutableStateOf(hasPreciseLocation(context)) }
@@ -104,12 +118,20 @@ private fun RoadDynoScreen(vm: MainViewModel = viewModel()) {
     val csvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
         if (uri != null && selectedId >= 0) vm.export(selectedId, uri)
     }
+    val csvImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            selectedId = -2L
+            page = "dyno"
+            vm.importCsv(uri)
+        }
+    }
 
     Column(Modifier.fillMaxSize().padding(20.dp)) {
         Text("ANDROID ROAD DYNO", style = MaterialTheme.typography.headlineSmall)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { page = "measurement" }) { Text("LOGGER") }
             OutlinedButton(onClick = { page = "sessions" }) { Text("SESSIONS") }
+            OutlinedButton(onClick = { page = "dyno" }) { Text("DYNO") }
         }
         HorizontalDivider()
         if (message != null) {
@@ -124,8 +146,19 @@ private fun RoadDynoScreen(vm: MainViewModel = viewModel()) {
                 onStart = vm::start,
                 onStop = vm::stop,
                 onSession = { id -> selectedId = id; page = "details" },
+                onAnalyzeSession = { id -> selectedId = id; page = "dyno" },
             )
             "sessions" -> SessionsPage(sessions) { id -> selectedId = id; page = "details" }
+            "dyno" -> {
+                val speedSamples by produceState<List<SpeedSample>?>(null, selectedId, imported) {
+                    value = when {
+                        selectedId == -2L -> imported?.samples
+                        selectedId >= 0 -> vm.getSamples(selectedId).map { it.toDomain() }
+                        else -> null
+                    }
+                }
+                DynoPage(speedSamples, onImport = { csvImportLauncher.launch(arrayOf("*/*")) })
+            }
             "details", "replay" -> {
                 val session = sessions.firstOrNull { it.id == selectedId }
                 val samples by produceState<List<SpeedSampleEntity>?>(null, selectedId) {
@@ -135,6 +168,7 @@ private fun RoadDynoScreen(vm: MainViewModel = viewModel()) {
                 else if (page == "details") SessionDetailsPage(
                     session, samples!!,
                     onReplay = { page = "replay" },
+                    onAnalyze = { page = "dyno" },
                     onExport = {
                         val date = SimpleDateFormat("yyyy-MM-dd_HHmm", Locale.US).format(Date(session.createdAtMillis))
                         csvLauncher.launch("AndroidRoadDyno_$date.csv")
@@ -159,6 +193,7 @@ private fun MeasurementPage(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onSession: (Long) -> Unit,
+    onAnalyzeSession: (Long) -> Unit,
 ) {
     val recording = state as? MeasurementState.Recording
     Column(
@@ -177,6 +212,14 @@ private fun MeasurementPage(
         Metric("Average Δt", recording?.statistics?.averageDeltaMs.ms())
         Metric("Min / max Δt", "${recording?.statistics?.minDeltaMs.ms()} / ${recording?.statistics?.maxDeltaMs.ms()}")
         Metric("Satellites", recording?.satellites?.let { "${it.visible ?: "—"} / ${it.usedInFix ?: "—"}" } ?: "—")
+        Metric("Raw GNSS events", recording?.satellites?.let {
+            if (it.rawMeasurementsAvailable) "${it.rawRateHz.hz()} · ${it.rawEventCount} events" else "UNAVAILABLE"
+        } ?: "—")
+        Metric("GNSS full tracking", when (recording?.satellites?.fullTrackingActive) {
+            true -> "ACTIVE"
+            false -> "INACTIVE"
+            null -> if (recording?.satellites?.rawMeasurementsAvailable == true) "REQUESTED" else "—"
+        })
         when {
             !precise -> Button(onClick = onPermission, modifier = Modifier.fillMaxWidth()) { Text("GRANT PRECISE LOCATION") }
             !gpsEnabled -> Button(onClick = onSettings, modifier = Modifier.fillMaxWidth()) { Text("OPEN LOCATION SETTINGS") }
@@ -185,7 +228,10 @@ private fun MeasurementPage(
             else -> Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) { Text("START") }
         }
         when (state) {
-            is MeasurementState.Completed -> Button(onClick = { onSession(state.sessionId) }) { Text("VIEW LAST SESSION") }
+            is MeasurementState.Completed -> {
+                Button(onClick = { onAnalyzeSession(state.sessionId) }, modifier = Modifier.fillMaxWidth()) { Text("ANALYZE LAST SESSION") }
+                OutlinedButton(onClick = { onSession(state.sessionId) }) { Text("SESSION DETAILS / EXPORT CSV") }
+            }
             is MeasurementState.Error -> Text(state.message, color = MaterialTheme.colorScheme.error)
             else -> Unit
         }
@@ -214,6 +260,7 @@ private fun SessionDetailsPage(
     session: SessionEntity,
     samples: List<SpeedSampleEntity>,
     onReplay: () -> Unit,
+    onAnalyze: () -> Unit,
     onExport: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -232,8 +279,122 @@ private fun SessionDetailsPage(
         Metric("Best / worst accuracy", "${report.bestSpeedAccuracyMps.msUnit()} / ${report.worstSpeedAccuracyMps.msUnit()}")
         Metric("Min / max speed", "${report.minSpeedKmh.kmh()} / ${report.maxSpeedKmh.kmh()}")
         Button(onClick = onReplay, modifier = Modifier.fillMaxWidth()) { Text("REPLAY") }
+        Button(onClick = onAnalyze, modifier = Modifier.fillMaxWidth()) { Text("ANALYZE DYNO") }
         Button(onClick = onExport, modifier = Modifier.fillMaxWidth()) { Text("EXPORT CSV") }
         OutlinedButton(onClick = onDelete, modifier = Modifier.fillMaxWidth(), enabled = session.status != "RECORDING") { Text("DELETE") }
+    }
+}
+
+@Composable
+private fun DynoPage(samples: List<SpeedSample>?, onImport: () -> Unit) {
+    var massText by rememberSaveable { mutableStateOf("") }
+    var calibrationRpmText by rememberSaveable { mutableStateOf("") }
+    var calibrationSpeedText by rememberSaveable { mutableStateOf("") }
+    var result by remember { mutableStateOf<DynoResult?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var working by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(samples) { result = null; error = null }
+
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text("ROAD DYNO", style = MaterialTheme.typography.titleLarge)
+        Text("Recorded session or raw CSV → power from acceleration and road load from the following coast.")
+        OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) { Text("OPEN RAW CSV") }
+        Text("Loaded samples: ${samples?.size ?: 0}")
+        OutlinedTextField(
+            massText, onValueChange = { massText = it; result = null },
+            label = { Text("Measurement mass: car + driver + load [kg]") },
+            modifier = Modifier.fillMaxWidth(), singleLine = true,
+        )
+        Text("Optional RPM calibration on the measurement gear")
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                calibrationRpmText, onValueChange = { calibrationRpmText = it; result = null },
+                label = { Text("RPM") }, modifier = Modifier.weight(1f), singleLine = true,
+            )
+            OutlinedTextField(
+                calibrationSpeedText, onValueChange = { calibrationSpeedText = it; result = null },
+                label = { Text("At km/h") }, modifier = Modifier.weight(1f), singleLine = true,
+            )
+        }
+        Button(
+            onClick = {
+                val input = samples ?: return@Button
+                val mass = massText.replace(',', '.').toDoubleOrNull()
+                if (mass == null || mass <= 0) { error = "Enter the real measurement mass in kg."; return@Button }
+                val rpm = calibrationRpmText.replace(',', '.').toDoubleOrNull()
+                val speed = calibrationSpeedText.replace(',', '.').toDoubleOrNull()
+                if ((rpm == null) != (speed == null) ||
+                    (rpm == null && (calibrationRpmText.isNotBlank() || calibrationSpeedText.isNotBlank()))
+                ) { error = "Fill both RPM calibration fields or leave both empty."; return@Button }
+                working = true
+                error = null
+                scope.launch {
+                    val calculated = runCatching {
+                        withContext(Dispatchers.Default) { DynoEngine().analyze(input, mass, rpm, speed) }
+                    }
+                    result = calculated.getOrNull()
+                    error = calculated.exceptionOrNull()?.message
+                    working = false
+                }
+            },
+            enabled = samples != null && !working,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (working) "CALCULATING…" else "CALCULATE POWER") }
+        if (error != null) Text(error ?: "", color = MaterialTheme.colorScheme.error)
+        result?.let { report ->
+            HorizontalDivider()
+            Metric("Peak acceleration power", "${report.peakWheelPowerKw.number(1)} kW / ${(report.peakWheelPowerKw * 1.3596216).number(1)} KM")
+            Metric("Peak with road load", report.peakCorrectedPowerKw?.let {
+                "${it.number(1)} kW / ${(it * 1.3596216).number(1)} KM"
+            } ?: "— (no overlapping coast)")
+            Metric("Peak torque", report.peakTorqueNm?.let { "${it.number(0)} Nm" } ?: "— (add RPM calibration)")
+            Metric("Acceleration", "${report.accelerationStartSeconds.number(1)}–${report.peakSeconds.number(1)} s")
+            Metric("Coast", if (report.coastStartSeconds != null && report.coastEndSeconds != null)
+                "${report.coastStartSeconds.number(1)}–${report.coastEndSeconds.number(1)} s" else "—")
+            Metric("Coast speed range", if (report.coastMinKmh != null && report.coastMaxKmh != null)
+                "${report.coastMinKmh.number(1)}–${report.coastMaxKmh.number(1)} km/h" else "—")
+            Metric("Sample rate", report.sampleRateHz.hz())
+            Text(if (report.points.any { it.rpm != null }) "Power vs RPM" else "Power vs speed",
+                style = MaterialTheme.typography.titleMedium)
+            PowerChart(report.points)
+            Text("Blue: acceleration power. Orange: power plus coast road load where speeds overlap.")
+            Text("Road load is measured during neutral coasting and includes slope and wind. Repeat in the opposite direction before comparing absolute results.")
+        }
+    }
+}
+
+@Composable
+private fun PowerChart(points: List<DynoPoint>) {
+    val x = points.map { it.rpm ?: it.speedKmh }
+    val minX = x.minOrNull() ?: return
+    val maxX = x.maxOrNull() ?: return
+    val maxPower = points.maxOf { maxOf(it.wheelPowerKw, it.correctedPowerKw ?: 0.0) }
+    Canvas(Modifier.fillMaxWidth().height(240.dp)) {
+        val left = 12.dp.toPx()
+        val bottom = size.height - 16.dp.toPx()
+        val top = 12.dp.toPx()
+        val width = (size.width - left - 8.dp.toPx()).coerceAtLeast(1f)
+        val height = (bottom - top).coerceAtLeast(1f)
+        fun position(i: Int, power: Double): Offset {
+            val horizontal = if (maxX > minX) (x[i] - minX) / (maxX - minX) else 0.0
+            return Offset(left + (horizontal * width).toFloat(),
+                bottom - (power / maxPower.coerceAtLeast(0.1) * height).toFloat())
+        }
+        drawLine(Color.Gray, Offset(left, top), Offset(left, bottom), strokeWidth = 1f)
+        drawLine(Color.Gray, Offset(left, bottom), Offset(size.width, bottom), strokeWidth = 1f)
+        for (i in 1 until points.size) {
+            drawLine(Color(0xFF176B93), position(i - 1, points[i - 1].wheelPowerKw),
+                position(i, points[i].wheelPowerKw), strokeWidth = 3.dp.toPx())
+            val before = points[i - 1].correctedPowerKw
+            val after = points[i].correctedPowerKw
+            if (before != null && after != null)
+                drawLine(Color(0xFFE18A20), position(i - 1, before), position(i, after),
+                    strokeWidth = 3.dp.toPx())
+        }
     }
 }
 
