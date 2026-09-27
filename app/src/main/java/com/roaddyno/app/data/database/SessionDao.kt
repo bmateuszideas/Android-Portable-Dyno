@@ -31,6 +31,11 @@ interface SessionDao {
     @Query("SELECT * FROM measurement_sessions WHERE id = :sessionId")
     suspend fun getSession(sessionId: Long): SessionEntity?
 
+    @Query("""UPDATE measurement_sessions SET vehicleName = :vehicle, measurementMassKg = :mass,
+        measurementGear = :gear, calibrationRpm = :rpm, calibrationSpeedKmh = :speed
+        WHERE id = :sessionId AND status != 'RECORDING'""")
+    suspend fun updateConfiguration(sessionId: Long, vehicle: String, mass: Double, gear: Int?, rpm: Double?, speed: Double?)
+
     @Query("SELECT * FROM speed_samples WHERE sessionId = :sessionId ORDER BY sampleIndex ASC")
     suspend fun getSamples(sessionId: Long): List<SpeedSampleEntity>
 

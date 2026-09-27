@@ -7,6 +7,9 @@ import androidx.lifecycle.viewModelScope
 import com.roaddyno.app.RoadDynoApp
 import com.roaddyno.app.export.CsvExporter
 import com.roaddyno.app.dyno.RawCsvReader
+import com.roaddyno.app.dyno.RunConfiguration
+import com.roaddyno.app.dyno.DynoResult
+import com.roaddyno.app.export.DynoCsvWriter
 import com.roaddyno.app.domain.model.SpeedSample
 import com.roaddyno.app.service.MeasurementService
 import kotlinx.coroutines.Dispatchers
@@ -26,13 +29,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val mutableImported = MutableStateFlow<ImportedRun?>(null)
     val imported = mutableImported.asStateFlow()
 
-    fun start() {
-        try { MeasurementService.start(getApplication()) }
+    private val preferences = application.getSharedPreferences("run_setup", 0)
+    fun lastConfiguration(): RunConfiguration? = runCatching {
+        RunConfiguration(
+            preferences.getString("vehicle", "") ?: "",
+            preferences.getString("mass", null)?.toDoubleOrNull() ?: return null,
+            preferences.getString("gear", null)?.toIntOrNull(),
+            preferences.getString("rpm", null)?.toDoubleOrNull(),
+            preferences.getString("kmh", null)?.toDoubleOrNull(),
+        ).validate()
+    }.getOrNull()
+
+    fun start(configuration: RunConfiguration) {
+        try {
+            configuration.validate()
+            preferences.edit().putString("vehicle", configuration.vehicleName)
+                .putString("mass", configuration.massKg.toString())
+                .putString("gear", configuration.gear?.toString())
+                .putString("rpm", configuration.calibrationRpm?.toString())
+                .putString("kmh", configuration.calibrationSpeedKmh?.toString()).apply()
+            MeasurementService.start(getApplication(), configuration)
+        }
         catch (error: Exception) { mutableMessage.value = error.message ?: "Unable to start recording." }
     }
 
     fun stop() = MeasurementService.stop(getApplication())
     suspend fun getSamples(sessionId: Long) = repository.getSamples(sessionId)
+    suspend fun getSession(sessionId: Long) = repository.getSession(sessionId)
+    fun saveConfiguration(sessionId: Long, configuration: RunConfiguration) = viewModelScope.launch {
+        try { repository.saveConfiguration(sessionId, configuration) }
+        catch (error: Exception) { mutableMessage.value = error.message ?: "Nie zapisano ustawień." }
+    }
     fun delete(sessionId: Long) = viewModelScope.launch { repository.delete(sessionId) }
 
     fun export(sessionId: Long, uri: Uri) = viewModelScope.launch {
@@ -46,7 +73,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearMessage() { mutableMessage.value = null }
 
+    fun exportResult(uri: Uri, result: DynoResult, configuration: RunConfiguration) = viewModelScope.launch {
+        try {
+            withContext(Dispatchers.IO) {
+                getApplication<Application>().contentResolver.openOutputStream(uri, "wt")?.writer()?.use {
+                    DynoCsvWriter.write(it, result, configuration)
+                } ?: error("Nie można zapisać pliku.")
+            }
+            mutableMessage.value = "Zapisano wynik CSV."
+        } catch (error: Exception) { mutableMessage.value = error.message ?: "Błąd zapisu wyniku." }
+    }
+
     fun importCsv(uri: Uri) = viewModelScope.launch {
+        mutableImported.value = null
         try {
             val samples = withContext(Dispatchers.IO) {
                 getApplication<Application>().contentResolver.openInputStream(uri)?.reader()?.use { RawCsvReader.read(it) }

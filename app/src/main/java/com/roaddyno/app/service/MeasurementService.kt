@@ -22,6 +22,7 @@ import com.roaddyno.app.data.database.SpeedSampleEntity
 import com.roaddyno.app.data.database.toEntity
 import com.roaddyno.app.data.repository.MeasurementRepository
 import com.roaddyno.app.domain.model.SpeedSample
+import com.roaddyno.app.dyno.RunConfiguration
 import com.roaddyno.app.gnss.GnssStatusInfo
 import com.roaddyno.app.gnss.GnssStatusMonitor
 import com.roaddyno.app.gnss.PhoneGnssSpeedSource
@@ -64,8 +65,15 @@ class MeasurementService : Service() {
         private val mutableState = MutableStateFlow<MeasurementState>(MeasurementState.Idle)
         val state = mutableState.asStateFlow()
 
-        fun start(context: Context) = ContextCompat.startForegroundService(
-            context, Intent(context, MeasurementService::class.java).setAction(ACTION_START),
+        fun start(context: Context, configuration: RunConfiguration) = ContextCompat.startForegroundService(
+            context, Intent(context, MeasurementService::class.java).setAction(ACTION_START).apply {
+                configuration.validate()
+                putExtra("vehicle", configuration.vehicleName)
+                putExtra("mass", configuration.massKg)
+                configuration.gear?.let { putExtra("gear", it) }
+                configuration.calibrationRpm?.let { putExtra("rpm", it) }
+                configuration.calibrationSpeedKmh?.let { putExtra("kmh", it) }
+            },
         )
 
         fun stop(context: Context) {
@@ -101,7 +109,14 @@ class MeasurementService : Service() {
                         notification("Preparing GNSS measurement"),
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION,
                     )
-                    preparingJob = scope.launch { prepare() }
+                    val configuration = RunConfiguration(
+                        intent.getStringExtra("vehicle") ?: "",
+                        intent.getDoubleExtra("mass", Double.NaN),
+                        if (intent.hasExtra("gear")) intent.getIntExtra("gear", 0) else null,
+                        if (intent.hasExtra("rpm")) intent.getDoubleExtra("rpm", 0.0) else null,
+                        if (intent.hasExtra("kmh")) intent.getDoubleExtra("kmh", 0.0) else null,
+                    ).validate()
+                    preparingJob = scope.launch { prepare(configuration) }
                 } catch (error: Exception) {
                     mutableState.value = MeasurementState.Error(error.message ?: "Unable to start the location service.")
                     stopSelf()
@@ -119,7 +134,7 @@ class MeasurementService : Service() {
         return START_NOT_STICKY
     }
 
-    private suspend fun prepare() {
+    private suspend fun prepare(configuration: RunConfiguration) {
         mutableState.value = MeasurementState.Preparing
         val repository = (application as RoadDynoApp).repository
         var sessionId: Long? = null
@@ -129,7 +144,7 @@ class MeasurementService : Service() {
             }
             check(manager.isProviderEnabled(LocationManager.GPS_PROVIDER)) { "Enable GPS before recording." }
             (application as RoadDynoApp).recovery.await()
-            sessionId = repository.createSession()
+            sessionId = repository.createSession(configuration)
             val activeSource = PhoneGnssSpeedSource(applicationContext, manager)
             source = activeSource
             activeSource.start()
