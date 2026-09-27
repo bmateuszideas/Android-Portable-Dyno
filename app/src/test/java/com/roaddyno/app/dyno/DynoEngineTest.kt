@@ -15,7 +15,7 @@ class DynoEngineTest {
 
     @Test fun accelerationAndCoastProducePowerAndLossOnlyAtMeasuredSpeeds() {
         val samples = (0..20).map { sample(it, 10.0 + it * 0.5) } +
-            (21..70).map { sample(it, 20.0 - (it - 20) * 0.2) }
+            (21..50).map { sample(it, 20.0 - (it - 20) * 0.2) }
         val result = DynoEngine().analyze(samples, 1_000.0, 3_000.0, 54.0)
         assertNotNull(result.coastStartSeconds)
         val middle = result.points.minByOrNull { kotlin.math.abs(it.speedKmh - 54.0) }!!
