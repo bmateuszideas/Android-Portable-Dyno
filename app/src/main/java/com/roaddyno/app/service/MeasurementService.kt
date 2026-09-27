@@ -23,6 +23,8 @@ import com.roaddyno.app.data.database.toEntity
 import com.roaddyno.app.data.repository.MeasurementRepository
 import com.roaddyno.app.domain.model.SpeedSample
 import com.roaddyno.app.dyno.RunConfiguration
+import com.roaddyno.app.dyno.WheelTravel
+import com.roaddyno.app.dyno.WheelTravelCalculator
 import com.roaddyno.app.gnss.GnssStatusInfo
 import com.roaddyno.app.gnss.GnssStatusMonitor
 import com.roaddyno.app.gnss.PhoneGnssSpeedSource
@@ -36,6 +38,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.produceIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -49,6 +52,7 @@ sealed interface MeasurementState {
         val sample: SpeedSample? = null,
         val statistics: SamplingStatistics = SamplingStatistics(),
         val satellites: GnssStatusInfo = GnssStatusInfo(),
+        val wheelTravel: WheelTravel = WheelTravel(),
     ) : MeasurementState
     data class Stopping(val sessionId: Long) : MeasurementState
     data class Completed(val sessionId: Long) : MeasurementState
@@ -73,6 +77,9 @@ class MeasurementService : Service() {
                 configuration.gear?.let { putExtra("gear", it) }
                 configuration.calibrationRpm?.let { putExtra("rpm", it) }
                 configuration.calibrationSpeedKmh?.let { putExtra("kmh", it) }
+                configuration.speed2000Kmh?.let { putExtra("speed2000", it) }
+                configuration.speed3000Kmh?.let { putExtra("speed3000", it) }
+                putExtra("tyre", configuration.tyreSize)
             },
         )
 
@@ -115,6 +122,9 @@ class MeasurementService : Service() {
                         if (intent.hasExtra("gear")) intent.getIntExtra("gear", 0) else null,
                         if (intent.hasExtra("rpm")) intent.getDoubleExtra("rpm", 0.0) else null,
                         if (intent.hasExtra("kmh")) intent.getDoubleExtra("kmh", 0.0) else null,
+                        if (intent.hasExtra("speed2000")) intent.getDoubleExtra("speed2000", 0.0) else null,
+                        if (intent.hasExtra("speed3000")) intent.getDoubleExtra("speed3000", 0.0) else null,
+                        intent.getStringExtra("tyre"),
                     ).validate()
                     preparingJob = scope.launch { prepare(configuration) }
                 } catch (error: Exception) {
@@ -153,7 +163,7 @@ class MeasurementService : Service() {
             statusMonitor.start()
             mutableState.value = MeasurementState.Recording(sessionId)
             recordingJob = scope.launch(Dispatchers.Default) {
-                record(repository, activeSource, statusMonitor, sessionId)
+                record(repository, activeSource, statusMonitor, sessionId, configuration)
             }
         } catch (error: Exception) {
             source?.stop()
@@ -171,8 +181,10 @@ class MeasurementService : Service() {
         activeSource: PhoneGnssSpeedSource,
         statusMonitor: GnssStatusMonitor,
         sessionId: Long,
+        configuration: RunConfiguration,
     ) {
         val statistics = SamplingStatisticsCalculator()
+        val wheelTravel = WheelTravelCalculator(configuration.tyreGeometry())
         val pending = ArrayList<SpeedSampleEntity>(50)
         var previousTimestampNs: Long? = null
         var index = 0L
@@ -181,9 +193,9 @@ class MeasurementService : Service() {
         var lastFlushNs = SystemClock.elapsedRealtimeNanos()
         val statusJob = scope.launch {
             statusMonitor.status.collect { satellites ->
-                val current = mutableState.value
-                if (current is MeasurementState.Recording && current.sessionId == sessionId) {
-                    mutableState.value = current.copy(satellites = satellites)
+                mutableState.update { current ->
+                    if (current is MeasurementState.Recording && current.sessionId == sessionId)
+                        current.copy(satellites = satellites) else current
                 }
             }
         }
@@ -218,10 +230,11 @@ class MeasurementService : Service() {
                 pending += sample.toEntity(sessionId, index++, flags)
                 previousTimestampNs = sample.timestampNs
                 val snapshot = statistics.accept(sample, flags != 0)
+                val travel = wheelTravel.accept(sample)
                 if (pending.size >= 50) flush()
-                val current = mutableState.value
-                if (current is MeasurementState.Recording && current.sessionId == sessionId) {
-                    mutableState.value = current.copy(sample = sample, statistics = snapshot)
+                mutableState.update { current ->
+                    if (current is MeasurementState.Recording && current.sessionId == sessionId)
+                        current.copy(sample = sample, statistics = snapshot, wheelTravel = travel) else current
                 }
                 if (sample.receivedElapsedRealtimeNs - lastNotificationNs >= 1_000_000_000L) {
                     lastNotificationNs = sample.receivedElapsedRealtimeNs

@@ -3,9 +3,13 @@ package com.roaddyno.app.dyno
 import com.roaddyno.app.domain.model.SpeedSample
 import java.io.Reader
 
+data class RawCsvRecording(val samples: List<SpeedSample>, val configuration: RunConfiguration?)
+
 /** Reads the raw columns exported by the logger; calculated CSV columns are ignored. */
 object RawCsvReader {
-    fun read(reader: Reader): List<SpeedSample> = reader.buffered().useLines { lines ->
+    fun read(reader: Reader): List<SpeedSample> = readRecording(reader).samples
+
+    fun readRecording(reader: Reader): RawCsvRecording = reader.buffered().useLines { lines ->
         val iterator = lines.iterator()
         require(iterator.hasNext()) { "CSV is empty." }
         val header = fields(iterator.next()).map { it.trim().removePrefix("\uFEFF") }
@@ -14,9 +18,20 @@ object RawCsvReader {
         val accuracy = header.indexOf("speed_accuracy_mps")
         val hasSpeed = header.indexOf("has_speed")
         require(timestamp >= 0 && speed >= 0) { "CSV needs timestamp_ns and speed_mps columns." }
-        iterator.asSequence().filter { it.isNotBlank() }.mapIndexed { index, line ->
+        var configuration: RunConfiguration? = null
+        val samples = iterator.asSequence().filter { it.isNotBlank() }.mapIndexed { index, line ->
             val cells = fields(line)
             fun cell(at: Int) = if (at >= 0) cells.getOrNull(at)?.trim() else null
+            fun named(name: String) = cell(header.indexOf(name))?.takeIf { it.isNotBlank() }
+            if (index == 0) {
+                val mass = named("mass_kg")?.toDoubleOrNull()
+                if (mass != null) configuration = RunConfiguration(
+                    named("vehicle") ?: "", mass, named("gear")?.toIntOrNull(),
+                    named("calibration_rpm")?.toDoubleOrNull(), named("calibration_speed_kmh")?.toDoubleOrNull(),
+                    named("speed_at_2000_rpm_kmh")?.toDoubleOrNull(), named("speed_at_3000_rpm_kmh")?.toDoubleOrNull(),
+                    named("tyre_size"),
+                ).validate()
+            }
             val timeNs = cell(timestamp)?.toLongOrNull()
                 ?: throw IllegalArgumentException("Invalid timestamp at CSV row ${index + 2}.")
             val speedMps = cell(speed)?.toDoubleOrNull()
@@ -24,11 +39,15 @@ object RawCsvReader {
             SpeedSample(
                 timestampNs = timeNs, speedMps = speedMps,
                 speedAccuracyMps = cell(accuracy)?.toDoubleOrNull(),
-                latitude = null, longitude = null, altitudeM = null,
-                horizontalAccuracyM = null, bearingDeg = null,
+                latitude = named("latitude")?.toDoubleOrNull(), longitude = named("longitude")?.toDoubleOrNull(),
+                altitudeM = named("altitude_m")?.toDoubleOrNull(), horizontalAccuracyM = named("horizontal_accuracy_m")?.toDoubleOrNull(),
+                bearingDeg = named("bearing_deg")?.toDoubleOrNull(),
                 hasSpeed = cell(hasSpeed)?.lowercase() != "false",
+                receivedElapsedRealtimeNs = named("received_elapsed_realtime_ns")?.toLongOrNull() ?: timeNs,
+                provider = named("provider"),
             )
         }.toList()
+        RawCsvRecording(samples, configuration)
     }
 
     private fun fields(line: String): List<String> {

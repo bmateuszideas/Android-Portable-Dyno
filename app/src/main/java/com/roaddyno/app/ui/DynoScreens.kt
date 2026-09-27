@@ -13,6 +13,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
@@ -23,6 +25,10 @@ import com.roaddyno.app.domain.model.SpeedSample
 import com.roaddyno.app.dyno.DynoEngine
 import com.roaddyno.app.dyno.DynoResult
 import com.roaddyno.app.dyno.RunConfiguration
+import com.roaddyno.app.dyno.RpmCalibration
+import com.roaddyno.app.dyno.TyreGeometry
+import com.roaddyno.app.dyno.WheelTravelCalculator
+import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -36,18 +42,53 @@ fun RunSetupForm(initial: RunConfiguration?, action: String, enabled: Boolean = 
     var gear by rememberSaveable { mutableStateOf(initial?.gear?.toString() ?: "") }
     var rpm by rememberSaveable { mutableStateOf(initial?.calibrationRpm?.toString() ?: "") }
     var speed by rememberSaveable { mutableStateOf(initial?.calibrationSpeedKmh?.toString() ?: "") }
+    var speed2000 by rememberSaveable { mutableStateOf(initial?.speed2000Kmh) }
+    var speed3000 by rememberSaveable { mutableStateOf(initial?.speed3000Kmh) }
+    var tyreSize by rememberSaveable { mutableStateOf(initial?.tyreSize ?: "") }
+    var calibrating by rememberSaveable { mutableStateOf(false) }
+    val calibrationVm: RpmCalibrationViewModel = viewModel()
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    fun applyCalibration(calibration: RpmCalibration) {
+        speed2000 = calibration.speed2000Kmh
+        speed3000 = calibration.speed3000Kmh
+        rpm = "2000.0"
+        speed = (2000 / calibration.rpmPerKmh).toString()
+    }
+    fun clearCalibration() { speed2000 = null; speed3000 = null; rpm = ""; speed = "" }
     var formError by remember { mutableStateOf<String?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(vehicle, { vehicle = it }, label = { Text("Samochód / opis") },
+        OutlinedTextField(vehicle, { vehicle = it; clearCalibration() }, label = { Text("Samochód / opis") },
             modifier = Modifier.fillMaxWidth(), singleLine = true)
         NumericField(mass, { mass = it }, "Masa pomiarowa [kg]")
-        NumericField(gear, { gear = it }, "Bieg pomiarowy (opcjonalnie)")
+        NumericField(gear, { gear = it; clearCalibration() }, "Bieg pomiarowy")
+        val selectedGear = gear.trim().toIntOrNull()?.takeIf { it > 0 }
+        OutlinedButton(onClick = { focusManager.clearFocus(); keyboard?.hide(); calibrating = true }, enabled = selectedGear != null,
+            modifier = Modifier.fillMaxWidth()) { Text("KALIBRUJ: 2000 → 3000 RPM") }
+        val saved = remember(vehicle, gear, speed2000, speed3000) { selectedGear?.let { calibrationVm.load(vehicle, it) } }
+        if (saved != null) OutlinedButton(onClick = { applyCalibration(saved) }) { Text("Wczytaj kalibrację tego auta i biegu") }
+        if (calibrating && selectedGear != null) RpmCalibrationDialog(vehicle, selectedGear, calibrationVm,
+            onClose = { calibrating = false }, onComplete = { applyCalibration(it); calibrating = false })
+        if (speed2000 != null && speed3000 != null) {
+            val calibration = RpmCalibration(speed2000!!, speed3000!!)
+            Text("Zapisano: 2000 RPM = ${f(speed2000!!, 2)} km/h; 3000 RPM = ${f(speed3000!!, 2)} km/h")
+            Text("Różnica przeliczników obu punktów: ${f(calibration.differencePercent, 1)}%")
+        }
         Text("Kalibracja na tym biegu: znane RPM przy znanej prędkości. Bez kalibracji otrzymasz moc względem km/h.",
             style = MaterialTheme.typography.bodySmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (speed2000 == null) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             NumericField(rpm, { rpm = it }, "RPM", Modifier.weight(1f))
             NumericField(speed, { speed = it }, "przy km/h", Modifier.weight(1f))
         }
+        if (speed2000 != null) OutlinedButton(onClick = { clearCalibration() }) { Text("Usuń kalibrację") }
+        OutlinedTextField(tyreSize, { tyreSize = it }, label = { Text("Opona, np. 225/45 R17 (opcjonalnie)") },
+            modifier = Modifier.fillMaxWidth(), singleLine = true)
+        val tyre = remember(tyreSize) { runCatching { TyreGeometry.parse(tyreSize) }.getOrNull() }
+        tyre?.let {
+            Text("Nominalnie: średnica ${f(it.diameterM * 1000, 1)} mm · obwód ${f(it.circumferenceM, 3)} m")
+        }
+        Text("Obroty koła i droga są wyliczane z prędkości GNSS oraz nominalnego obwodu opony.",
+            style = MaterialTheme.typography.bodySmall)
         formError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         Button(onClick = {
             try {
@@ -56,7 +97,7 @@ fun RunSetupForm(initial: RunConfiguration?, action: String, enabled: Boolean = 
                         ?: throw IllegalArgumentException("Wpisz poprawną liczbę: $text")
                 val config = RunConfiguration(vehicle.trim(), parse(mass) ?: error("Podaj masę pomiarową."),
                     if (gear.isBlank()) null else gear.trim().toIntOrNull() ?: error("Podaj numer biegu."),
-                    parse(rpm), parse(speed)).validate()
+                    parse(rpm), parse(speed), speed2000, speed3000, tyreSize.trim().takeIf { it.isNotBlank() }).validate()
                 formError = null
                 onSubmit(config)
             } catch (e: IllegalArgumentException) { formError = e.message }
@@ -83,7 +124,13 @@ fun RunResultPage(samples: List<SpeedSample>, initial: RunConfiguration?,
     var gear by rememberSaveable { mutableStateOf(initial?.gear) }
     var rpm by rememberSaveable { mutableStateOf(initial?.calibrationRpm) }
     var kmh by rememberSaveable { mutableStateOf(initial?.calibrationSpeedKmh) }
-    val config = mass?.let { RunConfiguration(vehicle, it, gear, rpm, kmh) }
+    var speed2000 by rememberSaveable { mutableStateOf(initial?.speed2000Kmh) }
+    var speed3000 by rememberSaveable { mutableStateOf(initial?.speed3000Kmh) }
+    var tyreSize by rememberSaveable { mutableStateOf(initial?.tyreSize) }
+    val config = mass?.let { RunConfiguration(vehicle, it, gear, rpm, kmh, speed2000, speed3000, tyreSize) }
+    val travel = remember(samples, tyreSize) {
+        WheelTravelCalculator(config?.tyreGeometry()).apply { samples.forEach { accept(it) } }.snapshot()
+    }
     var editing by rememberSaveable { mutableStateOf(initial == null) }
     var result by remember { mutableStateOf<DynoResult?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
@@ -101,7 +148,7 @@ fun RunResultPage(samples: List<SpeedSample>, initial: RunConfiguration?,
         working = true
         try {
             result = withContext(Dispatchers.Default) {
-                DynoEngine().analyze(samples, config.massKg, config.calibrationRpm, config.calibrationSpeedKmh)
+                DynoEngine().analyze(samples, config.massKg, config.effectiveCalibrationRpm, config.effectiveCalibrationSpeedKmh)
             }
         } catch (cancelled: CancellationException) { throw cancelled }
           catch (e: Exception) { failure = e.message ?: "Nie udało się obliczyć wyniku." }
@@ -116,9 +163,29 @@ fun RunResultPage(samples: List<SpeedSample>, initial: RunConfiguration?,
         if (editing) RunSetupForm(config, "OBLICZ I ZAPISZ USTAWIENIA", onSubmit = {
             vehicle = it.vehicleName; mass = it.massKg; gear = it.gear
             rpm = it.calibrationRpm; kmh = it.calibrationSpeedKmh
+            speed2000 = it.speed2000Kmh; speed3000 = it.speed3000Kmh; tyreSize = it.tyreSize
             editing = false
             onConfiguration(it)
         }) else OutlinedButton(onClick = { editing = true }) { Text("Zmień masę / kalibrację") }
+        config?.twoPointCalibration()?.let {
+            Text("Kalibracja: 2000 RPM / ${f(it.speed2000Kmh, 2)} km/h · 3000 RPM / ${f(it.speed3000Kmh, 2)} km/h")
+            Text("Różnica przeliczników: ${f(it.differencePercent)}%")
+        }
+        ResultMetric("Droga z prędkości GNSS", "${f(travel.distanceM)} m")
+        config?.tyreGeometry()?.let { tyre ->
+            ResultMetric("Opona / nominalny obwód", "${config.tyreSize} / ${f(tyre.circumferenceM, 3)} m")
+            ResultMetric("Wyliczone obroty koła na całej trasie", f(travel.wheelTurns ?: 0.0, 1))
+            val maxWheelRpm = samples.filter { it.hasSpeed && it.speedMps.isFinite() && it.speedMps >= 0 }
+                .maxOfOrNull { tyre.wheelRpm(it.speedMps) }
+            maxWheelRpm?.let { ResultMetric("Maks. wyliczone obroty koła", "${f(it, 0)} obr/min") }
+            val engineRpm = config.effectiveCalibrationRpm
+            val calibrationSpeed = config.effectiveCalibrationSpeedKmh
+            if (engineRpm != null && calibrationSpeed != null)
+                ResultMetric("Wyliczone przełożenie całkowite", f(tyre.totalRatio(engineRpm / calibrationSpeed), 3))
+            Text("To obliczenia z GPS i nominalnego rozmiaru opony, bez niezależnego czujnika koła.",
+                style = MaterialTheme.typography.bodySmall)
+        }
+        if (travel.omittedIntervals > 0) Text("Droga częściowa — pominięte odcinki bez poprawnej prędkości lub z przerwą ponad 5 s: ${travel.omittedIntervals}.")
         if (working) Text("Obliczam moc, straty i moment…")
         failure?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         result?.let { report ->
@@ -140,7 +207,7 @@ fun RunResultPage(samples: List<SpeedSample>, initial: RunConfiguration?,
                     "Krzywa ze stratami obejmuje wspólny zakres prędkości."
             } else "Brak wystarczającego wybiegu. Dostępna jest moc rozpędzania.")
             val x = report.points.map { it.rpm ?: it.speedKmh }
-            val xLabel = if (rpm != null) "RPM" else "km/h"
+            val xLabel = if (config?.effectiveCalibrationRpm != null) "RPM" else "km/h"
             Text("MOC I STRATY", style = MaterialTheme.typography.titleMedium)
             CurveChart(x, listOf(
                 Curve("Rozpędzanie", Color(0xFF1976D2), report.points.map { it.wheelPowerKw * 1.3596216 }),

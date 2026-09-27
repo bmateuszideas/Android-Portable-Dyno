@@ -23,6 +23,9 @@ class MeasurementRepository(private val database: RoadDynoDatabase) {
         measurementGear = configuration.gear,
         calibrationRpm = configuration.calibrationRpm,
         calibrationSpeedKmh = configuration.calibrationSpeedKmh,
+        speed2000Kmh = configuration.speed2000Kmh,
+        speed3000Kmh = configuration.speed3000Kmh,
+        tyreSize = configuration.tyreSize,
     ))
 
     suspend fun append(sessionId: Long, samples: List<SpeedSampleEntity>) {
@@ -38,7 +41,7 @@ class MeasurementRepository(private val database: RoadDynoDatabase) {
     suspend fun saveConfiguration(id: Long, config: RunConfiguration) {
         config.validate()
         dao.updateConfiguration(id, config.vehicleName, config.massKg, config.gear,
-            config.calibrationRpm, config.calibrationSpeedKmh)
+            config.calibrationRpm, config.calibrationSpeedKmh, config.speed2000Kmh, config.speed3000Kmh, config.tyreSize)
     }
     suspend fun getSamples(id: Long) = dao.getSamples(id)
     suspend fun delete(id: Long) = dao.deleteSession(id)

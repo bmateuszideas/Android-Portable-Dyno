@@ -21,8 +21,11 @@ data class SessionEntity(
     val measurementGear: Int? = null,
     val calibrationRpm: Double? = null,
     val calibrationSpeedKmh: Double? = null,
+    val speed2000Kmh: Double? = null,
+    val speed3000Kmh: Double? = null,
+    val tyreSize: String? = null,
 ) {
     fun configuration(): RunConfiguration? = measurementMassKg?.let {
-        RunConfiguration(vehicleName, it, measurementGear, calibrationRpm, calibrationSpeedKmh)
+        RunConfiguration(vehicleName, it, measurementGear, calibrationRpm, calibrationSpeedKmh, speed2000Kmh, speed3000Kmh, tyreSize)
     }
 }

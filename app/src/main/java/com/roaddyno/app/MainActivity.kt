@@ -168,7 +168,7 @@ private fun RoadDynoScreen(vm: MainViewModel = viewModel()) {
                 androidx.compose.runtime.key(selectedId, imported) {
                     val loaded by produceState<Pair<List<SpeedSample>, RunConfiguration?>?>(null) {
                         value = when {
-                            selectedId == -2L -> imported?.let { it.samples to null }
+                            selectedId == -2L -> imported?.let { it.samples to it.configuration }
                             selectedId >= 0 -> vm.getSamples(selectedId).map { it.toDomain() } to
                                 vm.getSession(selectedId)?.configuration()
                             else -> null
@@ -234,6 +234,12 @@ private fun MeasurementPage(
             Text("Rozpędź auto na wybranym biegu, rozłącz napęd i wykonaj wybieg. Po zakończeniu naciśnij STOP.")
             Metric("Odebrane próbki", recording?.statistics?.sampleCount?.toString() ?: "—")
             Metric("Próbkowanie", recording?.statistics?.currentRateHz.hz())
+            Metric("Droga z prędkości GNSS", "${recording?.wheelTravel?.distanceM.number(1)} m")
+            recording?.wheelTravel?.wheelRpm?.let {
+                Metric("Obroty koła z GPS + opony", "${it.number(0)} obr/min")
+                Metric("Łącznie obrotów koła", recording.wheelTravel.wheelTurns.number(1))
+            }
+            if ((recording?.wheelTravel?.omittedIntervals ?: 0) > 0) Text("Droga częściowa — wystąpiły przerwy w danych.")
             if (state is MeasurementState.Stopping) Text("Zapisuję sesję…")
             else Button(onClick = onStop, modifier = Modifier.fillMaxWidth().height(72.dp)) { Text("STOP · OBLICZ WYNIK") }
             var diagnostics by remember { mutableStateOf(false) }
