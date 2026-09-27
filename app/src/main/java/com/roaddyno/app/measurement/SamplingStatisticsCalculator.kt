@@ -57,7 +57,8 @@ class SamplingStatisticsCalculator {
             medianDeltaMs = distributionMedian,
             minDeltaMs = deltas.minOrNull(),
             maxDeltaMs = deltas.maxOrNull(),
-            gapCount = distributionMedian?.let { med -> if (med > 0) deltas.count { it > 3 * med } else 0 } ?: 0,
+            // A single missed update creates an interval close to 2x the normal cadence.
+            gapCount = distributionMedian?.let { med -> if (med > 0) deltas.count { it > 1.5 * med } else 0 } ?: 0,
             anomalyCount = anomalies,
         )
     }
